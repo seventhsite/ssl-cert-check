@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-PROGRAMVERSION=4.14
+PROGRAMVERSION=4.15
 #
 # Program: SSL Certificate Check <ssl-cert-check>
 #
@@ -12,6 +12,10 @@ PROGRAMVERSION=4.14
 # Last Updated: 11-12-2020
 #
 # Revision History:
+#
+# Version 4.15
+#  - Added Telegram notifications support with -T, -B (bot token) and -C (chat ID) options
+#  - Added certificate name verification against hostname (CN and SANs)
 #
 # Version 4.14
 #  - Fixed HOST / PORT discovery @mhow2
@@ -311,6 +315,15 @@ PKCSDBPASSWD=""
 # Type of certificate (PEM, DER, NET) (cmdline: -t)
 CERTTYPE="pem"
 
+# Don't send notifications to Telegram by default (cmdline: -T)
+TELEGRAM="FALSE"
+
+# Telegram Bot token (cmdline: -B)
+TELEGRAM_BOT_TOKEN=""
+
+# Telegram Chat ID (cmdline: -C)
+TELEGRAM_CHAT_ID=""
+
 # Location of system binaries
 AWK=$(command -v awk)
 DATE=$(command -v date)
@@ -409,6 +422,25 @@ send_mail() {
     esac
 }
 
+#####################################################
+### Send telegram message
+### Accepts two parameters:
+###  $1 -> Subject
+###  $2 -> Message
+#####################################################
+send_telegram() {
+    if [ "${TELEGRAM}" != "TRUE" ] || [ -z "${TELEGRAM_BOT_TOKEN}" ] || [ -z "${TELEGRAM_CHAT_ID}" ]; then
+        return
+    fi
+    SUBJECT="${1}"
+    MSG="${2}"
+    TEXT="${SUBJECT}%0A${MSG}"
+    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=${TELEGRAM_CHAT_ID}" \
+        -d "text=${TEXT}" \
+        -d "parse_mode=HTML" > /dev/null
+}
+
 #############################################################################
 # Purpose: Convert a date from MONTH-DAY-YEAR to Julian format
 # Acknowledgements: Code was adapted from examples in the book
@@ -499,9 +531,9 @@ prints()
     if [ "${QUIET}" != "TRUE" ] && [ "${ISSUER}" = "TRUE" ] && [ "${VALIDATION}" != "TRUE" ]; then
         MIN_DATE=$(echo "$4" | "${AWK}" '{ printf "%3s %2d %4d", $1, $2, $4 }')
         if [ "${NAGIOS}" = "TRUE" ]; then
-            ${PRINTF} "%-35s %-17s %-8s %-11s %s\n" "$1:$2" "$6" "$3" "$MIN_DATE" "|days=$5"
+            ${PRINTF} "%-35s %-17s %-15s %-11s %s\n" "$1:$2" "$6" "$3" "$MIN_DATE" "|days=$5"
         else
-            ${PRINTF} "%-35s %-17s %-8s %-11s %4d\n" "$1:$2" "$6" "$3" "$MIN_DATE" "$5"
+            ${PRINTF} "%-35s %-17s %-15s %-11s %4d\n" "$1:$2" "$6" "$3" "$MIN_DATE" "$5"
         fi
     elif [ "${QUIET}" != "TRUE" ] && [ "${ISSUER}" = "TRUE" ] && [ "${VALIDATION}" = "TRUE" ]; then
         ${PRINTF} "%-35s %-35s %-32s %-17s\n" "$1:$2" "$7" "$8" "$6"
@@ -509,9 +541,9 @@ prints()
     elif [ "${QUIET}" != "TRUE" ] && [ "${VALIDATION}" != "TRUE" ]; then
         MIN_DATE=$(echo "$4" | "${AWK}" '{ printf "%3s %2d, %4d", $1, $2, $4 }')
         if [ "${NAGIOS}" = "TRUE" ]; then
-            ${PRINTF} "%-47s %-12s %-12s %s\n" "$1:$2" "$3" "$MIN_DATE" "|days=$5"
+            ${PRINTF} "%-47s %-15s %-12s %s\n" "$1:$2" "$3" "$MIN_DATE" "|days=$5"
         else
-            ${PRINTF} "%-47s %-12s %-12s %4d\n" "$1:$2" "$3" "$MIN_DATE" "$5"
+            ${PRINTF} "%-47s %-15s %-12s %4d\n" "$1:$2" "$3" "$MIN_DATE" "$5"
         fi
     elif [ "${QUIET}" != "TRUE" ] && [ "${VALIDATION}" = "TRUE" ]; then
         ${PRINTF} "%-35s %-35s %-32s\n" "$1:$2" "$7" "$8"
@@ -528,8 +560,8 @@ print_heading()
 {
     if [ "${NOHEADER}" != "TRUE" ]; then
         if [ "${QUIET}" != "TRUE" ] && [ "${ISSUER}" = "TRUE" ] && [ "${NAGIOS}" != "TRUE" ] && [ "${VALIDATION}" != "TRUE" ]; then
-            ${PRINTF} "\n%-35s %-17s %-8s %-11s %-4s\n" "Host" "Issuer" "Status" "Expires" "Days"
-            echo "----------------------------------- ----------------- -------- ----------- ----"
+            ${PRINTF} "\n%-35s %-17s %-15s %-11s %-4s\n" "Host" "Issuer" "Status" "Expires" "Days"
+            echo "----------------------------------- ----------------- --------------- ----------- ----"
 
         elif [ "${QUIET}" != "TRUE" ] && [ "${ISSUER}" = "TRUE" ] && [ "${NAGIOS}" != "TRUE" ] && [ "${VALIDATION}" = "TRUE" ]; then
             ${PRINTF} "\n%-35s %-35s %-32s %-17s\n" "Host" "Common Name" "Serial #" "Issuer"
@@ -615,7 +647,7 @@ set_summary()
 ##########################################
 usage()
 {
-    echo "Usage: $0 [ -e email address ] [-E sender email address] [ -x days ] [-q] [-a] [-b] [-h] [-i] [-n] [-N] [-v]"
+    echo "Usage: $0 [ -e email address ] [-E sender email address] [ -x days ] [-q] [-a] [-b] [-h] [-i] [-n] [-N] [-v] [-T] [-B token] [-C chat_id]"
     echo "       { [ -s common_name ] && [ -p port] } || { [ -f cert_file ] } || { [ -c cert file ] } || { [ -d cert dir ] }"
     echo ""
     echo "  -a                : Send a warning message through E-mail"
@@ -635,11 +667,50 @@ usage()
     echo "  -s commmon name   : Server to connect to (interactive mode)"
     echo "  -S                : Print validation information"
     echo "  -t type           : Specify the certificate type"
+    echo "  -T                : Enable Telegram notifications"
+    echo "  -B token          : Telegram Bot token"
+    echo "  -C chat_id        : Telegram Chat ID"
     echo "  -V                : Print version information"
     echo "  -x days           : Certificate expiration interval (eg. if cert_date < days)"
     echo ""
 }
 
+##########################################################################
+# Purpose: Verify if the hostname matches the certificate
+# Arguments:
+#   $1 -> Certificate file
+#   $2 -> Hostname
+#   $3 -> Certificate type
+##########################################################################
+verify_cert_name() {
+    local CERTFILE="$1"
+    local HOSTNAME="$2"
+    local CERTTYPE="$3"
+
+    # Get Subject Alternative Names and CN
+    local SANS=$("${OPENSSL}" x509 -in "${CERTFILE}" -noout -text -inform "${CERTTYPE}" | 
+                "${GREP}" -A1 "Subject Alternative Name" | 
+                "${SED}" -e '2!d;s/.*DNS://;s/, DNS:/ /g')
+    local CN=$("${OPENSSL}" x509 -in "${CERTFILE}" -subject -noout -inform "${CERTTYPE}" | 
+               "${SED}" -e 's/.*CN = //' | "${SED}" -e 's/, .*//')
+
+    # Convert hostname to lowercase for comparison
+    HOSTNAME=$(echo "${HOSTNAME}" | tr '[:upper:]' '[:lower:]')
+
+    # Check if hostname matches CN
+    if echo "${CN}" | tr '[:upper:]' '[:lower:]' | "${GREP}" -q "^${HOSTNAME}$"; then
+        return 0
+    fi
+
+    # Check if hostname matches any SAN
+    for san in ${SANS}; do
+        if echo "${san}" | tr '[:upper:]' '[:lower:]' | "${GREP}" -q "^${HOSTNAME}$"; then
+            return 0
+        fi
+    done
+
+    return 1
+}
 
 ##########################################################################
 # Purpose: Connect to a server ($1) and port ($2) to see if a certificate
@@ -723,7 +794,43 @@ check_file_status() {
         return
     fi
 
-    ### Grab the expiration date from the X.509 certificate
+    # Create a temporary file for the certificate if using PKCS12
+    if [ "${PKCSDBPASSWD}" != "" ]; then
+        "${OPENSSL}" pkcs12 -nokeys -in "${CERTFILE}" \
+                   -out "${CERT_TMP}" -clcerts -password pass:"${PKCSDBPASSWD}" 2> /dev/null
+        CURRENT_CERT="${CERT_TMP}"
+    else
+        CURRENT_CERT="${CERTFILE}"
+    fi
+
+    # Get certificate dates and info first
+    # Extract certificate information once at the start
+    ### Get certificate dates and info
+    CERTDATE=$("${OPENSSL}" x509 -in "${CURRENT_CERT}" -enddate -noout -inform "${CERTTYPE}" | \
+               "${SED}" 's/notAfter\=//')
+
+    ### Split the result into parameters, and pass the relevant pieces to date2julian
+    set -- ${CERTDATE}
+    MONTH=$(getmonth "${1}")
+
+    # Convert the date to seconds, and get the diff between NOW and the expiration date
+    CERTJULIAN=$(date2julian "${MONTH#0}" "${2#0}" "${4}")
+    CERTDIFF=$(date_diff "${NOWJULIAN}" "${CERTJULIAN}")
+
+    # Verify certificate name match if we have a hostname (not a file check)
+    if [ "${HOST}" != "FILE" ]; then
+        if ! verify_cert_name "${CURRENT_CERT}" "${HOST}" "${CERTTYPE}"; then
+            if [ "${ALARM}" = "TRUE" ]; then
+                send_mail "${SENDER}" "${ADMIN}" "Certificate name mismatch for ${HOST}" \
+                    "The SSL certificate for ${HOST} does not match the hostname! Certificate will expire on ${CERTDATE}"
+                send_telegram "⚠️ SSL Certificate Name Mismatch" \
+                    "<b>Domain:</b> ${HOST}%0A<b>Issue:</b> Certificate hostname mismatch%0A<b>Expires:</b> ${CERTDATE}"
+            fi
+            prints "${HOST}" "${PORT}" "Name mismatch" "${CERTDATE}" "${CERTDIFF}" "" "" ""
+            set_returncode 3
+            return
+        fi
+    fi
     if [ "${PKCSDBPASSWD}" != "" ]; then
         # Extract the certificate from the PKCS#12 database, and
         # send the informational message to /dev/null
@@ -778,6 +885,8 @@ check_file_status() {
         if [ "${ALARM}" = "TRUE" ]; then
             send_mail "${SENDER}" "${ADMIN}" "Certificate for ${HOST} \"(CN: ${COMMONNAME})\" has expired!" \
                 "The SSL certificate for ${HOST} \"(CN: ${COMMONNAME})\" has expired!"
+            send_telegram "🚫 SSL Certificate Expired" \
+                    "<b>Domain:</b> ${HOST}%0A<b>Common Name:</b> ${COMMONNAME}%0A<b>Status:</b> EXPIRED%0A<b>Expired on:</b> ${CERTDATE}"
         fi
 
         prints "${HOST}" "${PORT}" "Expired" "${CERTDATE}" "${CERTDIFF}" "${CERTISSUER}" "${COMMONNAME}" "${SERIAL}"
@@ -787,6 +896,8 @@ check_file_status() {
         if [ "${ALARM}" = "TRUE" ]; then
             send_mail "${SENDER}" "${ADMIN}" "Certificate for ${HOST} \"(CN: ${COMMONNAME})\" will expire in ${CERTDIFF} days or less" \
                 "The SSL certificate for ${HOST} \"(CN: ${COMMONNAME})\" will expire on ${CERTDATE}"
+            send_telegram "⚠️ SSL Certificate Expiring Soon" \
+                    "<b>Domain:</b> ${HOST}%0A<b>Common Name:</b> ${COMMONNAME}%0A<b>Days left:</b> ${CERTDIFF}%0A<b>Expires on:</b> ${CERTDATE}%0A<b>Issuer:</b> ${CERTISSUER}"
         fi
         prints "${HOST}" "${PORT}" "Expiring" "${CERTDATE}" "${CERTDIFF}" "${CERTISSUER}" "${COMMONNAME}" "${SERIAL}"
         RETCODE_LOCAL=1
@@ -804,7 +915,7 @@ check_file_status() {
 #################################
 ### Start of main program
 #################################
-while getopts abc:d:e:E:f:hik:nNp:qs:St:Vx: option
+while getopts abc:d:e:E:f:hik:nNp:qs:St:TB:C:Vx: option
 do
     case "${option}" in
         a) ALARM="TRUE";;
@@ -826,6 +937,9 @@ do
         s) HOST=$OPTARG;;
         S) VALIDATION="TRUE";;
         t) CERTTYPE=$OPTARG;;
+        T) TELEGRAM="TRUE";;
+        B) TELEGRAM_BOT_TOKEN=$OPTARG;;
+        C) TELEGRAM_CHAT_ID=$OPTARG;;
         V) echo "${PROGRAMVERSION}"
            exit 0
         ;;
@@ -834,6 +948,13 @@ do
            exit 1;;
     esac
 done
+
+### Check to make sure Telegram settings are provided when -T is used
+if [ "${TELEGRAM}" = "TRUE" ] && { [ -z "${TELEGRAM_BOT_TOKEN}" ] || [ -z "${TELEGRAM_CHAT_ID}" ]; }; then
+    echo "ERROR: You enabled Telegram notifications (-T), but bot token (-B) or chat ID (-C) is missing."
+    echo "FIX: Please provide both -B and -C parameters when using -T."
+    exit 1
+fi
 
 ### Check to make sure a openssl utility is available
 if [ ! -f "${OPENSSL}" ]; then
@@ -885,8 +1006,12 @@ else
 fi
 
 # Place to stash temporary files
-CERT_TMP=$($MKTEMP /var/tmp/cert.XXXXXX)
-ERROR_TMP=$($MKTEMP /var/tmp/error.XXXXXX)
+CERT_TMP=$($MKTEMP) || { echo "ERROR: Cannot create temporary file for certificate"; exit 1; }
+ERROR_TMP=$($MKTEMP) || { echo "ERROR: Cannot create temporary file for errors"; exit 1; }
+
+# Ensure temporary files are readable/writable
+touch "${CERT_TMP}" "${ERROR_TMP}" || { echo "ERROR: Cannot initialize temporary files"; exit 1; }
+chmod 600 "${CERT_TMP}" "${ERROR_TMP}" || { echo "ERROR: Cannot set permissions on temporary files"; exit 1; }
 
 ### Baseline the dates so we have something to compare to
 MONTH=$(${DATE} "+%m")
@@ -917,8 +1042,15 @@ elif [ -f "${SERVERFILE}" ]; then
     IFS=$'\n'
     for LINE in $(grep -E -v '(^#|^$)' "${SERVERFILE}")
     do
-        HOST=${LINE%% *}
-        PORT=${LINE##* }
+        # If the line contains a space, split into host and port
+        if [[ "$LINE" == *" "* ]]; then
+            HOST=${LINE%% *}
+            PORT=${LINE##* }
+        else
+            # If no port specified, use 443 (default HTTPS port)
+            HOST=$LINE
+            PORT=443
+        fi
         IFS=" "
         if [ "$PORT" = "FILE" ]; then
             check_file_status "${HOST}" "FILE" "${HOST}"
